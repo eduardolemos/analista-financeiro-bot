@@ -1,6 +1,7 @@
 """
 utils/precos.py
 Busca preços em tempo real — B3 via BRAPI, USA via yfinance, Crypto via yfinance
+Sempre retorna o último preço disponível, mesmo com mercado fechado.
 """
 
 import os
@@ -14,16 +15,52 @@ BRAPI_TOKEN = os.environ.get("BRAPI_TOKEN", "")
 BRAPI_URL = "https://brapi.dev/api/quote/{tickers}?fundamental=true&token={token}"
 
 
+def _yf_preco_com_fallback(yf_ticker: str) -> tuple[float, float]:
+    """
+    Busca preço via yfinance com fallback pra history().
+    Retorna (preco_atual, preco_anterior).
+    Sempre tenta history() se fast_info retornar 0.
+    """
+    # Tentativa 1: fast_info (mais rápido)
+    try:
+        t = yf.Ticker(yf_ticker)
+        info = t.fast_info
+        preco = float(info.last_price or 0)
+        prev = float(info.previous_close or 0)
+        if preco > 0:
+            return preco, prev if prev > 0 else preco
+    except Exception as e:
+        logger.debug(f"fast_info falhou para {yf_ticker}: {e}")
+
+    # Tentativa 2: history (sempre retorna último fechamento)
+    try:
+        t = yf.Ticker(yf_ticker)
+        hist = t.history(period="5d")
+        if not hist.empty:
+            preco = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2]) if len(hist) > 1 else preco
+            if preco > 0:
+                logger.info(f"{yf_ticker}: usando último fechamento via history()")
+                return preco, prev
+    except Exception as e:
+        logger.debug(f"history() falhou para {yf_ticker}: {e}")
+
+    return 0.0, 0.0
+
+
 def buscar_precos_b3(tickers: list[str]) -> dict:
     """
-    Retorna dict com dados dos ativos B3:
-    { "PETR4": { "preco": 34.5, "variacao": -1.2, "dy": 8.5, "pvp": 0.9 } }
+    Retorna dict com dados dos ativos B3 via BRAPI.
+    BRAPI retorna regularMarketPrice mesmo fora do horário (último preço do dia).
+    Se BRAPI falhar, faz fallback via yfinance ({ticker}.SA).
     """
     if not tickers:
         return {}
 
     resultado = {}
-    # BRAPI aceita até 20 tickers por vez (reduzido pra evitar 400)
+
+    # Tentativa via BRAPI (batches de 20)
+    tickers_sem_preco = []
     for i in range(0, len(tickers), 20):
         batch = tickers[i:i+20]
         url = BRAPI_URL.format(tickers=",".join(batch), token=BRAPI_TOKEN)
@@ -31,23 +68,55 @@ def buscar_precos_b3(tickers: list[str]) -> dict:
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
             data = resp.json()
+            encontrados = set()
             for item in data.get("results", []):
                 ticker = item.get("symbol", "")
-                resultado[ticker] = {
-                    "preco":    item.get("regularMarketPrice", 0),
-                    "variacao": item.get("regularMarketChangePercent", 0),
-                    "abertura": item.get("regularMarketOpen", 0),
-                    "max_dia":  item.get("regularMarketDayHigh", 0),
-                    "min_dia":  item.get("regularMarketDayLow", 0),
-                    "volume":   item.get("regularMarketVolume", 0),
-                    "dy":       item.get("dividendYield", 0),
-                    "pvp":      item.get("priceToBook", 0),
-                    "pl":       item.get("priceEarnings", 0),
-                    "nome":     item.get("longName", ticker),
-                    "mercado":  "B3",
-                }
+                preco = item.get("regularMarketPrice", 0)
+                if preco and preco > 0:
+                    resultado[ticker] = {
+                        "preco":    preco,
+                        "variacao": item.get("regularMarketChangePercent", 0),
+                        "abertura": item.get("regularMarketOpen", 0),
+                        "max_dia":  item.get("regularMarketDayHigh", 0),
+                        "min_dia":  item.get("regularMarketDayLow", 0),
+                        "volume":   item.get("regularMarketVolume", 0),
+                        "dy":       item.get("dividendYield", 0),
+                        "pvp":      item.get("priceToBook", 0),
+                        "pl":       item.get("priceEarnings", 0),
+                        "nome":     item.get("longName", ticker),
+                        "mercado":  "B3",
+                    }
+                    encontrados.add(ticker)
+            # Tickers que não vieram ou vieram com preço 0
+            for t in batch:
+                if t not in encontrados:
+                    tickers_sem_preco.append(t)
         except Exception as e:
             logger.error(f"Erro BRAPI batch {batch}: {e}")
+            tickers_sem_preco.extend(batch)
+
+    # Fallback via yfinance para tickers que não vieram da BRAPI
+    for ticker in tickers_sem_preco:
+        yf_ticker = f"{ticker}.SA"
+        preco, prev = _yf_preco_com_fallback(yf_ticker)
+        if preco > 0:
+            variacao = ((preco - prev) / prev * 100) if prev > 0 else 0
+            resultado[ticker] = {
+                "preco":    preco,
+                "variacao": round(variacao, 2),
+                "abertura": 0,
+                "max_dia":  0,
+                "min_dia":  0,
+                "volume":   0,
+                "dy":       0,
+                "pvp":      0,
+                "pl":       0,
+                "nome":     ticker,
+                "mercado":  "B3",
+            }
+            logger.info(f"{ticker}: recuperado via yfinance fallback ({yf_ticker})")
+        else:
+            logger.warning(f"{ticker}: sem preço disponível (BRAPI + yfinance falharam)")
 
     return resultado
 
@@ -55,22 +124,18 @@ def buscar_precos_b3(tickers: list[str]) -> dict:
 def buscar_precos_usa(tickers: list[str]) -> dict:
     """
     Retorna dict com dados dos ativos americanos via yfinance.
-    Busca um a um para evitar connection pool overflow.
+    Sempre retorna último preço disponível, mesmo fora do horário.
     """
     if not tickers:
         return {}
 
     resultado = {}
     for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            info = t.fast_info
-            preco_atual = float(info.last_price or 0)
-            preco_ant   = float(info.previous_close or preco_atual)
-            variacao    = ((preco_atual - preco_ant) / preco_ant * 100) if preco_ant else 0
-
+        preco, prev = _yf_preco_com_fallback(ticker)
+        if preco > 0:
+            variacao = ((preco - prev) / prev * 100) if prev > 0 else 0
             resultado[ticker] = {
-                "preco":    preco_atual,
+                "preco":    preco,
                 "variacao": round(variacao, 2),
                 "dy":       0,
                 "pvp":      0,
@@ -78,30 +143,8 @@ def buscar_precos_usa(tickers: list[str]) -> dict:
                 "nome":     ticker,
                 "mercado":  "USA",
             }
-        except Exception as e:
-            logger.warning(f"Erro ticker USA {ticker}: {e}")
-            # Tenta fallback com history()
-            try:
-                t = yf.Ticker(ticker)
-                hist = t.history(period="5d")
-                if not hist.empty:
-                    preco_atual = float(hist["Close"].iloc[-1])
-                    preco_ant   = float(hist["Close"].iloc[-2]) if len(hist) > 1 else preco_atual
-                    variacao    = ((preco_atual - preco_ant) / preco_ant * 100) if preco_ant else 0
-                    resultado[ticker] = {
-                        "preco":    preco_atual,
-                        "variacao": round(variacao, 2),
-                        "dy":       0,
-                        "pvp":      0,
-                        "pl":       0,
-                        "nome":     ticker,
-                        "mercado":  "USA",
-                    }
-                    logger.info(f"Ticker {ticker} recuperado via fallback history()")
-                else:
-                    logger.error(f"{ticker}: possibly delisted; No price data found")
-            except Exception as e2:
-                logger.error(f"{ticker}: fallback also failed: {e2}")
+        else:
+            logger.warning(f"{ticker}: sem preço disponível")
 
     return resultado
 
@@ -118,22 +161,21 @@ CRYPTO_YF_MAP = {
 
 
 def buscar_precos_crypto(tickers: list[str]) -> dict:
-    """Busca preço de criptomoedas via yfinance (ticker-USD)"""
+    """
+    Busca preço de criptomoedas via yfinance (ticker-USD).
+    Crypto opera 24/7, então sempre tem preço disponível.
+    """
     if not tickers:
         return {}
 
     resultado = {}
     for ticker in tickers:
         yf_ticker = CRYPTO_YF_MAP.get(ticker.upper(), f"{ticker.upper()}-USD")
-        try:
-            t = yf.Ticker(yf_ticker)
-            info = t.fast_info
-            preco_usd = float(info.last_price or 0)
-            preco_ant = float(info.previous_close or preco_usd)
-            variacao = ((preco_usd - preco_ant) / preco_ant * 100) if preco_ant else 0
-
+        preco, prev = _yf_preco_com_fallback(yf_ticker)
+        if preco > 0:
+            variacao = ((preco - prev) / prev * 100) if prev > 0 else 0
             resultado[ticker] = {
-                "preco":    preco_usd,
+                "preco":    preco,
                 "variacao": round(variacao, 2),
                 "dy":       0,
                 "pvp":      0,
@@ -141,48 +183,43 @@ def buscar_precos_crypto(tickers: list[str]) -> dict:
                 "nome":     f"{ticker} (USD)",
                 "mercado":  "CRYPTO",
             }
-        except Exception as e:
-            logger.warning(f"Erro crypto {ticker} ({yf_ticker}): {e}")
+        else:
+            logger.warning(f"Crypto {ticker} ({yf_ticker}): sem preço disponível")
 
     return resultado
 
 
 def buscar_dolar() -> float:
     """Retorna cotação atual do dólar (USD/BRL) com múltiplos fallbacks"""
-    # Tentativa 1: yfinance
-    try:
-        ticker = yf.Ticker("USDBRL=X")
-        info = ticker.fast_info
-        preco = float(info.last_price or 0)
-        if preco > 0:
-            return preco
-    except Exception as e:
-        logger.warning(f"Erro yfinance dólar: {e}")
+    # Tentativa 1: yfinance (fast_info + history)
+    preco, _ = _yf_preco_com_fallback("USDBRL=X")
+    if preco > 0:
+        return preco
 
-    # Tentativa 2: yfinance history
-    try:
-        ticker = yf.Ticker("USDBRL=X")
-        hist = ticker.history(period="5d")
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
-    except Exception as e:
-        logger.warning(f"Erro yfinance history dólar: {e}")
-
-    # Tentativa 3: API pública AwesomeAPI
+    # Tentativa 2: API pública AwesomeAPI
     try:
         resp = requests.get("https://economia.awesomeapi.com.br/last/USD-BRL", timeout=10)
         data = resp.json()
-        return float(data["USDBRL"]["bid"])
+        preco = float(data["USDBRL"]["bid"])
+        if preco > 0:
+            logger.info("Dólar obtido via AwesomeAPI")
+            return preco
     except Exception as e:
         logger.warning(f"Erro AwesomeAPI dólar: {e}")
 
-    # Tentativa 4: BRAPI
+    # Tentativa 3: BRAPI
     try:
-        resp = requests.get(f"https://brapi.dev/api/v2/currency?currency=USD-BRL&token={BRAPI_TOKEN}", timeout=10)
+        resp = requests.get(
+            f"https://brapi.dev/api/v2/currency?currency=USD-BRL&token={BRAPI_TOKEN}",
+            timeout=10
+        )
         data = resp.json()
-        return float(data["currency"][0]["bidPrice"])
+        preco = float(data["currency"][0]["bidPrice"])
+        if preco > 0:
+            logger.info("Dólar obtido via BRAPI")
+            return preco
     except Exception as e:
         logger.warning(f"Erro BRAPI dólar: {e}")
 
     logger.error("Todas as fontes de dólar falharam, usando fallback 5.80")
-    return 5.80  # fallback
+    return 5.80
