@@ -81,6 +81,12 @@ def carregar_carteira(path: str) -> list[dict]:
             ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel", "symbol"])).upper()
             if not ticker or ticker in ("NAN", "NONE", ""):
                 continue
+            # Ignora linhas de resumo/totais (ex: "67 ATIVOS", "TOTAL", etc.)
+            if any(p in ticker.lower() for p in ["ativo", "total", "resumo", "soma", "subtotal"]):
+                continue
+            # Ignora tickers com espaço (não são tickers válidos)
+            if " " in ticker.strip():
+                continue
             # Quantidade pode vir como string com ponto de milhar
             qtd_raw = _get(row, ["quantidade", "qtd", "qtde", "cotas", "shares"])
             qtd = _float(str(qtd_raw).replace(".", "").replace(",", ".") if qtd_raw else 0)
@@ -228,13 +234,21 @@ def carregar_planilhas(paths: list[str]) -> tuple[list[dict], list[dict]]:
     return carteira, radar
 
 
+CRYPTO_TICKERS = {"BTC", "ETH", "LINK", "ADA", "CHZ", "SOL", "SOLV", "DOT", "AVAX",
+                  "MATIC", "XRP", "DOGE", "SHIB", "UNI", "AAVE", "CRV", "NEAR"}
+
+
 def _detectar_mercado(ticker: str) -> str:
     import re
+    if ticker.upper() in CRYPTO_TICKERS:
+        return "CRYPTO"
     return "B3" if re.match(r"^[A-Z]{3,4}\d{1,2}$", ticker) else "USA"
 
 
 def _detectar_classe(ticker: str) -> str:
     import re
+    if ticker.upper() in CRYPTO_TICKERS:
+        return "CRYPTO"
     if re.match(r"^[A-Z]{4}11$", ticker):
         return "FII"
     if re.match(r"^[A-Z]{3,4}\d$", ticker):
