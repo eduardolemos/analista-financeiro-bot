@@ -1,6 +1,6 @@
 """
 utils/precos.py
-Busca preços em tempo real — B3 via BRAPI, USA via yfinance
+Busca preços em tempo real — B3 via BRAPI, USA via yfinance, Crypto via yfinance
 """
 
 import os
@@ -23,9 +23,9 @@ def buscar_precos_b3(tickers: list[str]) -> dict:
         return {}
 
     resultado = {}
-    # BRAPI aceita até 50 tickers por vez
-    for i in range(0, len(tickers), 50):
-        batch = tickers[i:i+50]
+    # BRAPI aceita até 20 tickers por vez (reduzido pra evitar 400)
+    for i in range(0, len(tickers), 20):
+        batch = tickers[i:i+20]
         url = BRAPI_URL.format(tickers=",".join(batch), token=BRAPI_TOKEN)
         try:
             resp = requests.get(url, timeout=15)
@@ -54,8 +54,8 @@ def buscar_precos_b3(tickers: list[str]) -> dict:
 
 def buscar_precos_usa(tickers: list[str]) -> dict:
     """
-    Retorna dict com dados dos ativos americanos via yfinance:
-    { "AAPL": { "preco": 195.0, "variacao": 1.5, ... } }
+    Retorna dict com dados dos ativos americanos via yfinance.
+    Busca um a um para evitar connection pool overflow.
     """
     if not tickers:
         return {}
@@ -113,7 +113,7 @@ CRYPTO_YF_MAP = {
     "SOLV": "SOL-USD", "DOT": "DOT-USD", "AVAX": "AVAX-USD",
     "MATIC": "MATIC-USD", "XRP": "XRP-USD", "DOGE": "DOGE-USD",
     "SHIB": "SHIB-USD", "UNI": "UNI-USD", "AAVE": "AAVE-USD",
-    "CRV": "CRV-USD", "NEAR": "NEAR-USD",
+    "CRV": "CRV-USD", "NEAR": "NEAR-USD", "LTC": "LTC-USD",
 }
 
 
@@ -144,23 +144,45 @@ def buscar_precos_crypto(tickers: list[str]) -> dict:
         except Exception as e:
             logger.warning(f"Erro crypto {ticker} ({yf_ticker}): {e}")
 
-    return resultado() -> float:
-    """Retorna cotação atual do dólar (USD/BRL)"""
-    try:
-        ticker = yf.Ticker("USDBRL=X")
-        info   = ticker.fast_info
-        return float(info.last_price or 5.0)
-    except Exception as e:
-        logger.warning(f"Erro ao buscar dólar: {e}")
-        return 5.0  # fallback
--e 
+    return resultado
+
 
 def buscar_dolar() -> float:
-    """Retorna cotação atual do dólar (USD/BRL)"""
+    """Retorna cotação atual do dólar (USD/BRL) com múltiplos fallbacks"""
+    # Tentativa 1: yfinance
     try:
         ticker = yf.Ticker("USDBRL=X")
-        info   = ticker.fast_info
-        return float(info.last_price or 5.0)
+        info = ticker.fast_info
+        preco = float(info.last_price or 0)
+        if preco > 0:
+            return preco
     except Exception as e:
-        logger.warning(f"Erro ao buscar dólar: {e}")
-        return 5.0  # fallback
+        logger.warning(f"Erro yfinance dólar: {e}")
+
+    # Tentativa 2: yfinance history
+    try:
+        ticker = yf.Ticker("USDBRL=X")
+        hist = ticker.history(period="5d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception as e:
+        logger.warning(f"Erro yfinance history dólar: {e}")
+
+    # Tentativa 3: API pública AwesomeAPI
+    try:
+        resp = requests.get("https://economia.awesomeapi.com.br/last/USD-BRL", timeout=10)
+        data = resp.json()
+        return float(data["USDBRL"]["bid"])
+    except Exception as e:
+        logger.warning(f"Erro AwesomeAPI dólar: {e}")
+
+    # Tentativa 4: BRAPI
+    try:
+        resp = requests.get(f"https://brapi.dev/api/v2/currency?currency=USD-BRL&token={BRAPI_TOKEN}", timeout=10)
+        data = resp.json()
+        return float(data["currency"][0]["bidPrice"])
+    except Exception as e:
+        logger.warning(f"Erro BRAPI dólar: {e}")
+
+    logger.error("Todas as fontes de dólar falharam, usando fallback 5.80")
+    return 5.80  # fallback
