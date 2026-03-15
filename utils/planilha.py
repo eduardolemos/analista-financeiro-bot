@@ -78,19 +78,29 @@ def carregar_carteira(path: str) -> list[dict]:
         rows = _ler_excel(path)
         ativos = []
         for row in rows:
-            ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel"])).upper()
+            ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel", "symbol"])).upper()
             if not ticker or ticker in ("NAN", "NONE", ""):
                 continue
+            # Quantidade pode vir como string com ponto de milhar
+            qtd_raw = _get(row, ["quantidade", "qtd", "qtde", "cotas", "shares"])
+            qtd = _float(str(qtd_raw).replace(".", "").replace(",", ".") if qtd_raw else 0)
+
+            # Preço médio pode vir com R$, pontos e vírgulas
+            pm_raw = _get(row, ["preco_medio", "preço_médio", "preço médio", "pm", "preco medio", "custo medio", "preço médio"])
+            pm_str = str(pm_raw).replace("R$", "").replace(" ", "").replace(".", "").replace(",", ".") if pm_raw else "0"
+            pm = _float(pm_str)
+
             mercado = _str(_get(row, ["mercado", "bolsa", "market"], "")).upper()
             if not mercado:
                 mercado = _detectar_mercado(ticker)
-            classe = _str(_get(row, ["classe", "tipo", "categoria"], "")).upper()
+            classe = _str(_get(row, ["classe", "tipo", "categoria", "setor"], "")).upper()
             if not classe:
                 classe = _detectar_classe(ticker)
+
             ativos.append({
                 "ticker":      ticker,
-                "quantidade":  _float(_get(row, ["quantidade", "qtd", "qtde", "cotas"])),
-                "preco_medio": _float(_get(row, ["preco_medio", "preço_médio", "pm", "preco medio", "custo medio"])),
+                "quantidade":  qtd,
+                "preco_medio": pm,
                 "mercado":     mercado,
                 "classe":      classe,
             })
@@ -103,20 +113,77 @@ def carregar_carteira(path: str) -> list[dict]:
 
 def carregar_radar(path: str) -> list[dict]:
     try:
-        rows = _ler_excel(path)
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True)
+
+        # Tenta encontrar aba correta
+        aba_alvo = wb.active
+        for name in wb.sheetnames:
+            if any(p in name.lower() for p in ["dados", "teto", "radar", "acoes", "ações"]):
+                aba_alvo = wb[name]
+                break
+
+        rows_raw = list(aba_alvo.iter_rows(values_only=True))
+        if not rows_raw:
+            return []
+
+        # Encontra a linha de cabeçalho (ignora linhas de intro/link)
+        header_row = None
+        header_idx = 0
+        for i, row in enumerate(rows_raw):
+            row_str = [str(v).lower() if v else "" for v in row]
+            if any(p in " ".join(row_str) for p in ["código", "codigo", "ticker", "ativo"]):
+                header_row = row
+                header_idx = i
+                break
+
+        if not header_row:
+            logger.error("Cabeçalho não encontrado na planilha de radar")
+            return []
+
+        # Mapeia índices das colunas importantes
+        headers = [str(h).strip().lower() if h else "" for h in header_row]
+
+        def find_col(alternativas):
+            for alt in alternativas:
+                for i, h in enumerate(headers):
+                    if alt.lower() in h:
+                        return i
+            return None
+
+        idx_ticker  = find_col(["código", "codigo", "ticker", "ativo"])
+        idx_teto    = find_col(["preço teto", "preco teto", "teto"])
+        idx_dy      = find_col(["dividend yield bruto", "dy bruto", "dividend yield"])
+        idx_setor   = find_col(["atuação", "atuacao", "setor"])
+
+        if idx_ticker is None:
+            logger.error("Coluna de ticker não encontrada")
+            return []
+
         ativos = []
-        for row in rows:
-            ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel"])).upper()
-            if not ticker or ticker in ("NAN", "NONE", ""):
+        for row in rows_raw[header_idx+1:]:
+            if not row or all(v is None for v in row):
                 continue
+            ticker = _str(row[idx_ticker] if idx_ticker < len(row) else None).upper()
+            if not ticker or len(ticker) < 3 or ticker in ("NAN", "NONE", ""):
+                continue
+            # Ignora linhas que não são tickers válidos
+            if any(p in ticker.lower() for p in ["empresa", "link", "vídeo", "video", "planilha"]):
+                continue
+
+            teto = _float(row[idx_teto] if idx_teto and idx_teto < len(row) else None)
+            dy   = _float(row[idx_dy]   if idx_dy   and idx_dy   < len(row) else None)
+            setor = _str(row[idx_setor] if idx_setor and idx_setor < len(row) else None)
+
             ativos.append({
                 "ticker":     ticker,
-                "preco_teto": _float(_get(row, ["preco_teto", "preço_teto", "teto", "preco teto", "target"])),
-                "dy_minimo":  _float(_get(row, ["dy_minimo", "dy mínimo", "dy_min", "dy minimo", "dy%"])),
-                "pvp_maximo": _float(_get(row, ["pvp_maximo", "pvp máximo", "pvp_max", "p/vp", "pvp"])),
-                "setor":      _str(_get(row, ["setor", "sector", "segmento"])),
-                "notas":      _str(_get(row, ["notas", "observacoes", "observações", "obs"])),
+                "preco_teto": teto,
+                "dy_minimo":  0,
+                "pvp_maximo": 0,
+                "setor":      setor,
+                "notas":      f"DY estimado: {dy:.1%}" if dy else "",
             })
+
         logger.info(f"Radar carregado: {len(ativos)} ativos")
         return ativos
     except Exception as e:
