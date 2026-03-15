@@ -1,6 +1,6 @@
 """
 Bot Telegram — Analista Financeiro Pessoal
-Monitora carteira B3 + USA e envia alertas automáticos
+Monitora carteira B3 + USA + Crypto e envia alertas automáticos
 """
 
 import os
@@ -12,7 +12,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
 
-from utils.precos import buscar_precos_b3, buscar_precos_usa, buscar_dolar
+from utils.precos import buscar_precos_b3, buscar_precos_usa, buscar_precos_crypto, buscar_dolar
 from utils.planilha import carregar_carteira, carregar_radar, carregar_planilhas
 
 # Helper para mensagens longas
@@ -20,6 +20,7 @@ async def send_long(send_func, msg: str, parse_mode="Markdown"):
     """Divide mensagens longas em partes de 4000 chars"""
     for i in range(0, len(msg), 4000):
         await send_func(msg[i:i+4000], parse_mode=parse_mode)
+
 from utils.analise import (
     verificar_preco_teto,
     verificar_variacao_forte,
@@ -51,13 +52,29 @@ def dividir_mensagem(msg: str, limite: int = 4000) -> list[str]:
         if len(msg) <= limite:
             partes.append(msg)
             break
-        # Corta no último \n antes do limite
         corte = msg.rfind("\n", 0, limite)
         if corte == -1:
             corte = limite
         partes.append(msg[:corte])
         msg = msg[corte:].lstrip("\n")
     return partes
+
+
+def _buscar_todos_precos(carteira):
+    """Helper: busca preços B3 + USA + Crypto e retorna precos_br, precos_usa (com crypto mergido)"""
+    tickers_br     = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
+    tickers_usa    = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
+    tickers_crypto = [a["ticker"] for a in carteira if a["mercado"] == "CRYPTO"]
+
+    precos_br     = buscar_precos_b3(tickers_br)        if tickers_br     else {}
+    precos_usa    = buscar_precos_usa(tickers_usa)       if tickers_usa    else {}
+    precos_crypto = buscar_precos_crypto(tickers_crypto)  if tickers_crypto else {}
+
+    # Merge crypto into precos_usa (analise.py trata tudo que não é B3 como USA)
+    precos_usa.update(precos_crypto)
+
+    return precos_br, precos_usa
+
 
 # ─── Comandos manuais ─────────────────────────────────────────────────────────
 
@@ -109,12 +126,8 @@ async def cmd_carteira(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         carteira, _ = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
         dolar       = buscar_dolar()
-        tickers_br  = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
-        tickers_usa = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
-        precos_br   = buscar_precos_b3(tickers_br)   if tickers_br  else {}
-        precos_usa  = buscar_precos_usa(tickers_usa) if tickers_usa else {}
+        precos_br, precos_usa = _buscar_todos_precos(carteira)
         resultado = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
-        # gerar_resumo_diario retorna lista de mensagens
         msgs = resultado if isinstance(resultado, list) else [resultado]
         for msg in msgs:
             await update.message.reply_text(msg, parse_mode="Markdown")
@@ -150,10 +163,7 @@ async def cmd_variacao(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Verificando variações do dia...")
     try:
         carteira, _ = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
-        tickers_br  = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
-        tickers_usa = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
-        precos_br   = buscar_precos_b3(tickers_br)   if tickers_br  else {}
-        precos_usa  = buscar_precos_usa(tickers_usa) if tickers_usa else {}
+        precos_br, precos_usa = _buscar_todos_precos(carteira)
         msg = verificar_variacao_forte({**precos_br, **precos_usa}, threshold=3.0)
         await _send_long(update.message.reply_text, msg)
     except Exception as e:
@@ -167,10 +177,13 @@ async def cmd_matinal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         dolar           = buscar_dolar()
         tickers_br      = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
         tickers_usa     = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
+        tickers_crypto  = [a["ticker"] for a in carteira if a["mercado"] == "CRYPTO"]
         tickers_radar   = [a["ticker"] for a in radar if a["ticker"] not in tickers_br]
         todos_br        = list(set(tickers_br + tickers_radar))
-        precos_br       = buscar_precos_b3(todos_br)     if todos_br    else {}
-        precos_usa      = buscar_precos_usa(tickers_usa) if tickers_usa else {}
+        precos_br       = buscar_precos_b3(todos_br)          if todos_br       else {}
+        precos_usa      = buscar_precos_usa(tickers_usa)      if tickers_usa    else {}
+        precos_crypto   = buscar_precos_crypto(tickers_crypto) if tickers_crypto else {}
+        precos_usa.update(precos_crypto)
         msg = gerar_alerta_matinal(carteira, radar, precos_br, precos_usa, dolar)
         await _send_long(update.message.reply_text, msg)
     except Exception as e:
@@ -188,9 +201,6 @@ async def cmd_semanal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Erro cmd_semanal: {e}")
         await update.message.reply_text(f"❌ Erro: {e}")
-    except Exception as e:
-        logger.error(f"Erro cmd_semanal: {e}")
-        await update.message.reply_text(f"❌ Erro: {e}")
 
 # ─── Agendamentos automáticos ─────────────────────────────────────────────────
 
@@ -198,7 +208,6 @@ async def job_alerta_preco_teto(app: Application):
     """Diário às 18h — verifica ativos abaixo do preço teto"""
     try:
         carteira, radar = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
-        # Verifica radar completo + ativos da carteira que têm preço teto
         tickers = list(set(
             [a["ticker"] for a in radar] +
             [a["ticker"] for a in carteira if a.get("tem_teto")]
@@ -214,10 +223,7 @@ async def job_variacao_forte(app: Application):
     """Diário às 17h30 — verifica variações fortes (>3% ou <-3%)"""
     try:
         carteira, _  = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
-        tickers_br   = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
-        tickers_usa  = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
-        precos_br    = buscar_precos_b3(tickers_br)   if tickers_br  else {}
-        precos_usa   = buscar_precos_usa(tickers_usa) if tickers_usa else {}
+        precos_br, precos_usa = _buscar_todos_precos(carteira)
         msg = verificar_variacao_forte({**precos_br, **precos_usa}, threshold=3.0)
         if msg:
             await send_long(lambda t, parse_mode=None: app.bot.send_message(chat_id=CHAT_ID, text=t, parse_mode=parse_mode), msg)
@@ -229,10 +235,7 @@ async def job_resumo_diario(app: Application):
     try:
         carteira, _  = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
         dolar        = buscar_dolar()
-        tickers_br   = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
-        tickers_usa  = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
-        precos_br    = buscar_precos_b3(tickers_br)   if tickers_br  else {}
-        precos_usa   = buscar_precos_usa(tickers_usa) if tickers_usa else {}
+        precos_br, precos_usa = _buscar_todos_precos(carteira)
         msgs = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
         for msg in msgs:
             await app.bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode="Markdown")
@@ -240,16 +243,19 @@ async def job_resumo_diario(app: Application):
         logger.error(f"Erro job_resumo_diario: {e}")
 
 async def job_alerta_matinal(app: Application):
-    """Diário às 11h — alerta matinal: variações do momento + oportunidades swing + carteira"""
+    """Diário às 11h — alerta matinal"""
     try:
         carteira, radar = carregar_planilhas([CARTEIRA_PATH, RADAR_PATH])
         dolar           = buscar_dolar()
         tickers_br      = [a["ticker"] for a in carteira if a["mercado"] == "B3"]
         tickers_usa     = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
+        tickers_crypto  = [a["ticker"] for a in carteira if a["mercado"] == "CRYPTO"]
         tickers_radar   = [a["ticker"] for a in radar if a["ticker"] not in tickers_br]
         todos_br        = list(set(tickers_br + tickers_radar))
-        precos_br       = buscar_precos_b3(todos_br)          if todos_br     else {}
-        precos_usa      = buscar_precos_usa(tickers_usa)      if tickers_usa  else {}
+        precos_br       = buscar_precos_b3(todos_br)          if todos_br       else {}
+        precos_usa      = buscar_precos_usa(tickers_usa)      if tickers_usa    else {}
+        precos_crypto   = buscar_precos_crypto(tickers_crypto) if tickers_crypto else {}
+        precos_usa.update(precos_crypto)
         msg = gerar_alerta_matinal(carteira, radar, precos_br, precos_usa, dolar)
         await send_long(lambda t, parse_mode=None: app.bot.send_message(chat_id=CHAT_ID, text=t, parse_mode=parse_mode), msg)
     except Exception as e:
@@ -267,8 +273,6 @@ async def job_resumo_semanal(app: Application):
         logger.error(f"Erro job_resumo_semanal: {e}")
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
-
-import asyncio
 
 async def post_init(app: Application) -> None:
     """Inicia o scheduler após o event loop estar pronto"""
@@ -304,7 +308,7 @@ async def main_async():
         await app.initialize()
         await app.start()
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        await asyncio.Event().wait()  # Mantém rodando indefinidamente
+        await asyncio.Event().wait()
 
 def main():
     asyncio.run(main_async())
