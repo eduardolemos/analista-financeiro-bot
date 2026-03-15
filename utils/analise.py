@@ -120,9 +120,10 @@ def gerar_resumo_diario(
     precos_br: dict,
     precos_usa: dict,
     dolar: float
-) -> str:
+) -> list[str]:
     """
     Gera resumo completo da carteira após fechamento do mercado.
+    Retorna lista de mensagens (dividida para respeitar limite do Telegram).
     """
     total_brl  = 0.0
     total_usa  = 0.0
@@ -130,36 +131,39 @@ def gerar_resumo_diario(
     linhas     = []
 
     for ativo in carteira:
-        ticker = ativo["ticker"]
-        qtd    = ativo["quantidade"]
-        pm     = ativo["preco_medio"]
+        ticker  = ativo["ticker"]
+        qtd     = ativo["quantidade"]
+        pm      = ativo["preco_medio"]
         mercado = ativo["mercado"]
         classe  = ativo["classe"]
 
+        if not qtd or qtd <= 0:
+            continue
+
         if mercado == "B3":
-            dados = precos_br.get(ticker, {})
-            preco = dados.get("preco", 0)
-            var   = dados.get("variacao", 0)
-            valor = preco * qtd
+            dados  = precos_br.get(ticker, {})
+            preco  = dados.get("preco", 0)
+            var    = dados.get("variacao", 0)
+            valor  = preco * qtd
             total_brl += valor
             emoji_var = "📈" if var > 0 else "📉" if var < 0 else "➡️"
             rentab = ((preco - pm) / pm * 100) if pm else 0
             linha = (
-                f"{emoji_var} *{ticker}* — R$ {preco:.2f} ({var:+.1f}%)\n"
-                f"   Qtd: {qtd:.0f} | Valor: R$ {valor:,.2f} | Rentab: {rentab:+.1f}%"
+                f"{emoji_var} *{ticker}* R$ {preco:.2f} ({var:+.1f}%) | "
+                f"Qtd: {qtd:.0f} | R$ {valor:,.0f} | {rentab:+.1f}%"
             )
-        else:  # USA
-            dados = precos_usa.get(ticker, {})
-            preco = dados.get("preco", 0)
-            var   = dados.get("variacao", 0)
+        else:
+            dados     = precos_usa.get(ticker, {})
+            preco     = dados.get("preco", 0)
+            var       = dados.get("variacao", 0)
             valor_usd = preco * qtd
             valor_brl = valor_usd * dolar
             total_usa += valor_brl
             emoji_var = "📈" if var > 0 else "📉" if var < 0 else "➡️"
             rentab = ((preco - pm) / pm * 100) if pm else 0
             linha = (
-                f"{emoji_var} *{ticker}* — US$ {preco:.2f} ({var:+.1f}%)\n"
-                f"   Qtd: {qtd:.0f} | Valor: US$ {valor_usd:,.2f} ≈ R$ {valor_brl:,.2f} | Rentab: {rentab:+.1f}%"
+                f"{emoji_var} *{ticker}* US$ {preco:.2f} ({var:+.1f}%) | "
+                f"Qtd: {qtd:.0f} | R$ {valor_brl:,.0f} | {rentab:+.1f}%"
             )
 
         linhas.append(linha)
@@ -167,23 +171,36 @@ def gerar_resumo_diario(
 
     patrimonio_total = total_brl + total_usa
 
-    msg = f"📊 *RESUMO DIÁRIO DA CARTEIRA* | {_agora()}\n"
-    msg += f"💵 Dólar: R$ {dolar:.2f}\n\n"
-
-    # Distribuição por classe
-    msg += "*📂 Distribuição por classe:*\n"
+    # Mensagem 1 — Resumo geral
+    msg1 = f"📊 *RESUMO DA CARTEIRA* | {_agora()}\n"
+    msg1 += f"💵 Dólar: R$ {dolar:.2f}\n\n"
+    msg1 += f"*💰 Patrimônio total: R$ {patrimonio_total:,.2f}*\n"
+    msg1 += f"  🇧🇷 B3: R$ {total_brl:,.2f}\n"
+    msg1 += f"  🇺🇸 USA: R$ {total_usa:,.2f}\n\n"
+    msg1 += "*📂 Por classe:*\n"
     for classe, valor in sorted(por_classe.items(), key=lambda x: -x[1]):
         pct = (valor / patrimonio_total * 100) if patrimonio_total else 0
-        msg += f"  • {classe}: R$ {valor:,.2f} ({pct:.1f}%)\n"
+        msg1 += f"  • {classe}: R$ {valor:,.0f} ({pct:.1f}%)\n"
 
-    msg += f"\n*💰 Patrimônio total: R$ {patrimonio_total:,.2f}*\n"
-    msg += f"  🇧🇷 B3: R$ {total_brl:,.2f}\n"
-    msg += f"  🇺🇸 USA: R$ {total_usa:,.2f}\n\n"
+    # Divide posições em blocos de 20 ativos
+    mensagens = [msg1]
+    bloco_atual = ""
+    count = 0
+    total_ativos = len(linhas)
 
-    msg += "*📋 Posições:*\n" + "\n\n".join(linhas)
-    msg += "\n\n⚠️ _Valores estimados. Não constitui recomendação de investimento._"
+    for i, linha in enumerate(linhas):
+        bloco_atual += linha + "\n"
+        count += 1
+        if count == 20 or i == total_ativos - 1:
+            inicio = i - count + 2
+            fim = i + 1
+            header = f"*📋 Posições ({inicio}-{fim} de {total_ativos}):*\n"
+            mensagens.append(header + bloco_atual)
+            bloco_atual = ""
+            count = 0
 
-    return msg
+    mensagens[-1] += "\n⚠️ _Valores estimados. Não constitui recomendação de investimento._"
+    return mensagens
 
 
 def gerar_alerta_matinal(
