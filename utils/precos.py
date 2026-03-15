@@ -3,13 +3,15 @@ utils/precos.py
 Busca preços em tempo real — B3 via BRAPI, USA via yfinance
 """
 
+import os
 import requests
 import yfinance as yf
 import logging
 
 logger = logging.getLogger(__name__)
 
-BRAPI_URL = "https://brapi.dev/api/quote/{tickers}?fundamental=true"
+BRAPI_TOKEN = os.environ.get("BRAPI_TOKEN", "")
+BRAPI_URL = "https://brapi.dev/api/quote/{tickers}?fundamental=true&token={token}"
 
 
 def buscar_precos_b3(tickers: list[str]) -> dict:
@@ -24,7 +26,7 @@ def buscar_precos_b3(tickers: list[str]) -> dict:
     # BRAPI aceita até 50 tickers por vez
     for i in range(0, len(tickers), 50):
         batch = tickers[i:i+50]
-        url   = BRAPI_URL.format(tickers=",".join(batch))
+        url = BRAPI_URL.format(tickers=",".join(batch), token=BRAPI_TOKEN)
         try:
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
