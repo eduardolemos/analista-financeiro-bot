@@ -113,8 +113,11 @@ async def cmd_carteira(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers_usa = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
         precos_br   = buscar_precos_b3(tickers_br)   if tickers_br  else {}
         precos_usa  = buscar_precos_usa(tickers_usa) if tickers_usa else {}
-        msg = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
-        await _send_long(update.message.reply_text, msg)
+        resultado = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
+        # gerar_resumo_diario retorna lista de mensagens
+        msgs = resultado if isinstance(resultado, list) else [resultado]
+        for msg in msgs:
+            await update.message.reply_text(msg, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Erro cmd_carteira: {e}")
         await update.message.reply_text(f"❌ Erro ao buscar carteira: {e}")
