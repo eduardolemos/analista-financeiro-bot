@@ -232,6 +232,8 @@ async def job_resumo_semanal(app: Application):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+import asyncio
+
 async def post_init(app: Application) -> None:
     """Inicia o scheduler após o event loop estar pronto"""
     scheduler = AsyncIOScheduler(timezone=BR_TZ)
@@ -243,7 +245,7 @@ async def post_init(app: Application) -> None:
     scheduler.start()
     logger.info("✅ Agendamentos ativos!")
 
-def main():
+async def main_async():
     app = (
         Application.builder()
         .token(TOKEN)
@@ -251,7 +253,6 @@ def main():
         .build()
     )
 
-    # Comandos
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("ajuda",    cmd_ajuda))
     app.add_handler(CommandHandler("status",   cmd_status))
@@ -263,7 +264,14 @@ def main():
     app.add_handler(CommandHandler("matinal",  cmd_matinal))
 
     logger.info("✅ Bot iniciado!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    async with app:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        await asyncio.Event().wait()  # Mantém rodando indefinidamente
+
+def main():
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
