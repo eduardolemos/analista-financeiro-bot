@@ -6,7 +6,7 @@ Monitora carteira B3 + USA e envia alertas automáticos
 import os
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 TOKEN        = os.environ["TELEGRAM_TOKEN"]       # Token do seu bot
 CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]     # Seu chat ID pessoal
-CARTEIRA_PATH = os.environ.get("CARTEIRA_PATH", "data/carteira.xlsx")
-RADAR_PATH    = os.environ.get("RADAR_PATH",    "data/radar.xlsx")
+CARTEIRA_PATH = os.environ.get("CARTEIRA_PATH", "carteira.xls")
+RADAR_PATH    = os.environ.get("RADAR_PATH",    "acoes_preco_teto.xlsx")
 
 BR_TZ = pytz.timezone("America/Sao_Paulo")
 
@@ -232,8 +232,24 @@ async def job_resumo_semanal(app: Application):
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+async def post_init(app: Application) -> None:
+    """Inicia o scheduler após o event loop estar pronto"""
+    scheduler = AsyncIOScheduler(timezone=BR_TZ)
+    scheduler.add_job(job_alerta_matinal,    "cron", hour=11, minute=0,  args=[app])
+    scheduler.add_job(job_variacao_forte,    "cron", hour=17, minute=30, args=[app])
+    scheduler.add_job(job_alerta_preco_teto, "cron", hour=18, minute=0,  args=[app])
+    scheduler.add_job(job_resumo_diario,     "cron", hour=18, minute=30, args=[app])
+    scheduler.add_job(job_resumo_semanal,    "cron", day_of_week="fri", hour=19, args=[app])
+    scheduler.start()
+    logger.info("✅ Agendamentos ativos!")
+
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .post_init(post_init)
+        .build()
+    )
 
     # Comandos
     app.add_handler(CommandHandler("start",    cmd_start))
@@ -246,16 +262,7 @@ def main():
     app.add_handler(CommandHandler("semanal",  cmd_semanal))
     app.add_handler(CommandHandler("matinal",  cmd_matinal))
 
-    # Agendador
-    scheduler = AsyncIOScheduler(timezone=BR_TZ)
-    scheduler.add_job(job_alerta_matinal,    "cron", hour=11, minute=0,  args=[app])  # 11h BRT — alerta matinal
-    scheduler.add_job(job_variacao_forte,    "cron", hour=17, minute=30, args=[app])  # 17h30 — variações do dia
-    scheduler.add_job(job_alerta_preco_teto, "cron", hour=18, minute=0,  args=[app])  # 18h — preço teto
-    scheduler.add_job(job_resumo_diario,     "cron", hour=18, minute=30, args=[app])  # 18h30 — resumo diário
-    scheduler.add_job(job_resumo_semanal,    "cron", day_of_week="fri", hour=19, args=[app])  # sexta 19h
-    scheduler.start()
-
-    logger.info("✅ Bot iniciado e agendamentos ativos!")
+    logger.info("✅ Bot iniciado!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
