@@ -78,14 +78,25 @@ def carregar_carteira(path: str) -> list[dict]:
         rows = _ler_excel(path)
         ativos = []
         for row in rows:
-            ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel", "symbol"])).upper()
+            ticker = _str(_get(row, ["ticker", "ativo", "codigo", "código", "papel", "symbol"])).upper().strip()
             if not ticker or ticker in ("NAN", "NONE", ""):
                 continue
-            # Ignora linhas de resumo/totais (ex: "67 ATIVOS", "TOTAL", etc.)
+
+            # ── Filtro robusto: só aceita tickers válidos ──
+            # Ignora linhas de resumo/totais
             if any(p in ticker.lower() for p in ["ativo", "total", "resumo", "soma", "subtotal"]):
                 continue
-            # Ignora tickers com espaço (não são tickers válidos)
-            if " " in ticker.strip():
+            # Ignora qualquer ticker com espaço (CDBs, Tesouro, "LTC LITECOIN", etc.)
+            if " " in ticker:
+                continue
+            # Ignora tickers que começam com números ou contêm caracteres especiais
+            if not ticker[0].isalpha():
+                continue
+            # Ignora tickers com mais de 10 caracteres (não existem na bolsa)
+            if len(ticker) > 10:
+                continue
+            # Ignora tickers que parecem CDB/renda fixa
+            if any(p in ticker.upper() for p in ["CDB", "CDI", "TESOURO", "IPCA", "SELIC", "LCA", "LCI", "PÓS", "POS", "PRE", "PRÉ"]):
                 continue
             # Quantidade pode vir como string com ponto de milhar
             qtd_raw = _get(row, ["quantidade", "qtd", "qtde", "cotas", "shares"])
@@ -235,7 +246,8 @@ def carregar_planilhas(paths: list[str]) -> tuple[list[dict], list[dict]]:
 
 
 CRYPTO_TICKERS = {"BTC", "ETH", "LINK", "ADA", "CHZ", "SOL", "SOLV", "DOT", "AVAX",
-                  "MATIC", "XRP", "DOGE", "SHIB", "UNI", "AAVE", "CRV", "NEAR"}
+                  "MATIC", "XRP", "DOGE", "SHIB", "UNI", "AAVE", "CRV", "NEAR",
+                  "LTC"}
 
 
 def _detectar_mercado(ticker: str) -> str:
