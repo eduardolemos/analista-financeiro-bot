@@ -35,12 +35,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN        = os.environ["TELEGRAM_TOKEN"]       # Token do seu bot
-CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]     # Seu chat ID pessoal
-CARTEIRA_PATH = os.environ.get("CARTEIRA_PATH", "carteira.xls")
+TOKEN        = os.environ["TELEGRAM_TOKEN"]
+CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]
+CARTEIRA_PATH = os.environ.get("CARTEIRA_PATH", "carteira.xlsx")
 RADAR_PATH    = os.environ.get("RADAR_PATH",    "acoes_preco_teto.xlsx")
 
 BR_TZ = pytz.timezone("America/Sao_Paulo")
+
+def dividir_mensagem(msg: str, limite: int = 4000) -> list[str]:
+    """Divide mensagem longa em partes menores para o Telegram"""
+    if len(msg) <= limite:
+        return [msg]
+    partes = []
+    while msg:
+        if len(msg) <= limite:
+            partes.append(msg)
+            break
+        # Corta no último \n antes do limite
+        corte = msg.rfind("\n", 0, limite)
+        if corte == -1:
+            corte = limite
+        partes.append(msg[:corte])
+        msg = msg[corte:].lstrip("\n")
+    return partes
 
 # ─── Comandos manuais ─────────────────────────────────────────────────────────
 
@@ -82,6 +99,11 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"• 📅 Resumo semanal: sextas às 19h"
     )
 
+async def _send_long(reply_func, msg: str):
+    """Envia mensagem dividida em partes se necessário"""
+    for parte in dividir_mensagem(msg):
+        await reply_func(parte, parse_mode="Markdown")
+
 async def cmd_carteira(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Buscando dados da carteira...")
     try:
@@ -91,9 +113,8 @@ async def cmd_carteira(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers_usa = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
         precos_br   = buscar_precos_b3(tickers_br)   if tickers_br  else {}
         precos_usa  = buscar_precos_usa(tickers_usa) if tickers_usa else {}
-        msgs = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
-        for msg in msgs:
-            await update.message.reply_text(msg, parse_mode="Markdown")
+        msg = gerar_resumo_diario(carteira, precos_br, precos_usa, dolar)
+        await _send_long(update.message.reply_text, msg)
     except Exception as e:
         logger.error(f"Erro cmd_carteira: {e}")
         await update.message.reply_text(f"❌ Erro ao buscar carteira: {e}")
@@ -105,7 +126,7 @@ async def cmd_radar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers  = [a["ticker"] for a in radar]
         precos   = buscar_precos_b3(tickers)
         msg      = verificar_preco_teto(radar, precos, apenas_abaixo=False)
-        await send_long(update.message.reply_text, msg)
+        await _send_long(update.message.reply_text, msg)
     except Exception as e:
         logger.error(f"Erro cmd_radar: {e}")
         await update.message.reply_text(f"❌ Erro ao verificar radar: {e}")
@@ -117,7 +138,7 @@ async def cmd_alerta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers  = [a["ticker"] for a in radar]
         precos   = buscar_precos_b3(tickers)
         msg      = verificar_preco_teto(radar, precos, apenas_abaixo=True)
-        await send_long(update.message.reply_text, msg)
+        await _send_long(update.message.reply_text, msg)
     except Exception as e:
         logger.error(f"Erro cmd_alerta: {e}")
         await update.message.reply_text(f"❌ Erro: {e}")
@@ -131,7 +152,7 @@ async def cmd_variacao(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         precos_br   = buscar_precos_b3(tickers_br)   if tickers_br  else {}
         precos_usa  = buscar_precos_usa(tickers_usa) if tickers_usa else {}
         msg = verificar_variacao_forte({**precos_br, **precos_usa}, threshold=3.0)
-        await send_long(update.message.reply_text, msg)
+        await _send_long(update.message.reply_text, msg)
     except Exception as e:
         logger.error(f"Erro cmd_variacao: {e}")
         await update.message.reply_text(f"❌ Erro: {e}")
@@ -145,10 +166,10 @@ async def cmd_matinal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers_usa     = [a["ticker"] for a in carteira if a["mercado"] == "USA"]
         tickers_radar   = [a["ticker"] for a in radar if a["ticker"] not in tickers_br]
         todos_br        = list(set(tickers_br + tickers_radar))
-        precos_br       = buscar_precos_b3(todos_br)          if todos_br     else {}
-        precos_usa      = buscar_precos_usa(tickers_usa)      if tickers_usa  else {}
+        precos_br       = buscar_precos_b3(todos_br)     if todos_br    else {}
+        precos_usa      = buscar_precos_usa(tickers_usa) if tickers_usa else {}
         msg = gerar_alerta_matinal(carteira, radar, precos_br, precos_usa, dolar)
-        await send_long(update.message.reply_text, msg)
+        await _send_long(update.message.reply_text, msg)
     except Exception as e:
         logger.error(f"Erro cmd_matinal: {e}")
         await update.message.reply_text(f"❌ Erro: {e}")
@@ -160,7 +181,10 @@ async def cmd_semanal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tickers  = [a["ticker"] for a in radar]
         precos   = buscar_precos_b3(tickers)
         msg      = gerar_resumo_semanal(radar, precos)
-        await send_long(update.message.reply_text, msg)
+        await _send_long(update.message.reply_text, msg)
+    except Exception as e:
+        logger.error(f"Erro cmd_semanal: {e}")
+        await update.message.reply_text(f"❌ Erro: {e}")
     except Exception as e:
         logger.error(f"Erro cmd_semanal: {e}")
         await update.message.reply_text(f"❌ Erro: {e}")
